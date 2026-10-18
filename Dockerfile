@@ -80,7 +80,11 @@ WORKDIR /calcom
 
 RUN apt-get update && apt-get install -y --no-install-recommends netcat-openbsd wget && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder-two /calcom ./
+# Ever Works managed target (Pod Security `restricted`, runAsNonRoot): the runtime files belong to the
+# image's `node` user (uid 1000) so start.sh can rewrite NEXT_PUBLIC_WEBAPP_URL and turbo/next can write
+# their caches without root. --chown on the COPY keeps it one layer (no chown -R duplicate).
+RUN chown 1000:1000 /calcom
+COPY --from=builder-two --chown=1000:1000 /calcom ./
 ARG NEXT_PUBLIC_WEBAPP_URL=http://localhost:3000
 ENV NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL \
   BUILT_NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL
@@ -90,5 +94,8 @@ EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=30s --retries=5 \
   CMD wget --spider http://localhost:3000 || exit 1
+
+# Numeric, so the kubelet can verify runAsNonRoot (a user NAME is refused as unverifiable).
+USER 1000:1000
 
 CMD ["/calcom/scripts/start.sh"]
