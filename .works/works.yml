@@ -1,0 +1,343 @@
+version: 2
+kind: app
+name: Cal (community build)
+spec:
+  blueprint:
+    id: cal
+    version: 0.1.0
+    repo: ever-works/cal-template
+    sha: "0000000000000000000000000000000000000000"
+  license:
+    spdx: MIT
+    class: green
+    source: blueprint
+    notice: Cal.diy® is a trademark of Cal.com, Inc. This community build is not
+      affiliated with or endorsed by Cal.com, Inc.
+  display:
+    name: Cal (community build)
+    protectedPaths:
+      - LICENSE
+      - apps/web/public/cal-*
+      - apps/web/public/calcom-*
+      - apps/web/public/favicon*
+      - apps/web/public/apple-touch-icon.png
+      - apps/web/public/emails/*ogo*
+      - packages/ui/components/logo/**
+  build:
+    strategy: dockerfile
+    dockerfile: Dockerfile
+    context: .
+    target: runner
+    args:
+      - name: MAX_OLD_SPACE_SIZE
+        value: "6144"
+      - name: CALCOM_TELEMETRY_DISABLED
+        value: "1"
+      - name: DATABASE_URL
+        fromEnv: DATABASE_URL
+    services:
+      - name: postgres
+        image: postgres:16
+    resources:
+      cpu: 4
+      memory: 12Gi
+      timeoutMinutes: 60
+  components:
+    - name: web
+      role: web
+      command:
+        - /calcom/scripts/start.sh
+      port: 3000
+      replicas: 1
+      writableRootFilesystem: true
+      probes:
+        startup:
+          http: /api/version
+          periodSeconds: 10
+          failureThreshold: 60
+        readiness:
+          http: /auth/login
+        liveness:
+          http: /api/version
+          periodSeconds: 30
+      resources:
+        cpu: 500m
+        memory: 1536Mi
+        memoryLimit: 3Gi
+  dependencies:
+    postgres:
+      version: "16"
+      directUrl: true
+    smtp:
+      required: true
+  env:
+    - name: NEXTAUTH_SECRET
+      secret: true
+      generate:
+        kind: base64
+        bytes: 32
+        rotate: never
+    - name: CALENDSO_ENCRYPTION_KEY
+      secret: true
+      generate:
+        kind: chars
+        length: 32
+        rotate: never
+      validate:
+        length: 32
+        pattern: ^[A-Za-z0-9]{32}$
+    - name: CRON_API_KEY
+      secret: true
+      generate:
+        kind: hex
+        bytes: 32
+        rotate: never
+    - name: CRON_SECRET
+      secret: true
+      generate:
+        kind: hex
+        bytes: 32
+        rotate: never
+    - name: DATABASE_URL
+      secret: true
+      phase: both
+      from: deps.postgres.url
+    - name: DATABASE_DIRECT_URL
+      secret: true
+      from: deps.postgres.directUrl
+    - name: DATABASE_HOST
+      template: "{{deps.postgres.host}}:{{deps.postgres.port}}"
+    - name: NEXT_PUBLIC_WEBAPP_URL
+      from: domains.primary.url
+    - name: NEXTAUTH_URL
+      template: "{{domains.primary.url}}/api/auth"
+    - name: NEXTAUTH_URL_INTERNAL
+      template: "{{components.web.internalUrl}}/api/auth"
+    - name: APP_WEB_INTERNAL_URL
+      from: components.web.internalUrl
+    - name: EMAIL_SERVER_HOST
+      from: deps.smtp.host
+    - name: EMAIL_SERVER_PORT
+      from: deps.smtp.port
+    - name: EMAIL_SERVER_USER
+      secret: true
+      from: deps.smtp.user
+    - name: EMAIL_SERVER_PASSWORD
+      secret: true
+      from: deps.smtp.password
+    - name: EMAIL_FROM
+      from: deps.smtp.from
+    - name: EMAIL_FROM_NAME
+      value: Cal (community build)
+    - name: CALCOM_TELEMETRY_DISABLED
+      value: "1"
+      phase: both
+    - name: TURBO_TELEMETRY_DISABLED
+      value: "1"
+    - name: TZ
+      value: UTC
+    - name: GOOGLE_LOGIN_ENABLED
+      value: "false"
+    - name: APP_BOOTSTRAP_ADMIN_EMAIL
+      prompt:
+        description: Email address of the first administrator
+        required: true
+      validate:
+        pattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+    - name: APP_BOOTSTRAP_ADMIN_PASSWORD
+      secret: true
+      prompt:
+        description: Password of the first administrator — 15 characters or more, with
+          upper-case, lower-case and a digit, and no leading or trailing spaces
+        required: true
+      validate:
+        minLength: 15
+        pattern: ^(?:.*[a-z].*[A-Z].*[0-9].*|.*[a-z].*[0-9].*[A-Z].*|.*[A-Z].*[a-z].*[0-9].*|.*[A-Z].*[0-9].*[a-z].*|.*[0-9].*[a-z].*[A-Z].*|.*[0-9].*[A-Z].*[a-z].*)$
+    - name: GOOGLE_API_CREDENTIALS
+      secret: true
+      prompt:
+        description: Google Calendar OAuth client JSON (optional)
+        required: false
+    - name: GOOGLE_WEBHOOK_TOKEN
+      secret: true
+      generate:
+        kind: hex
+        bytes: 32
+        rotate: never
+  jobs:
+    - name: migrate
+      when: pre-deploy
+      component: web
+      command:
+        - npx
+        - prisma
+        - migrate
+        - deploy
+        - --schema
+        - /calcom/packages/prisma/schema.prisma
+      timeoutSeconds: 1800
+    - name: bootstrap-admin
+      when: first-deploy
+      component: web
+      timeoutSeconds: 300
+      command:
+        - node
+        - --input-type=module
+        - -e
+        - >
+          const res = await
+          fetch(`${process.env.APP_WEB_INTERNAL_URL}/api/auth/setup`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              username: 'admin',
+              full_name: 'Administrator',
+              email_address: process.env.APP_BOOTSTRAP_ADMIN_EMAIL,
+              password: process.env.APP_BOOTSTRAP_ADMIN_PASSWORD,
+            }),
+          });
+
+          const text = await res.text();
+
+          if (res.ok) { console.log('bootstrap-admin: created');
+          process.exit(0); }
+
+          if (res.status === 400 && text.includes('No setup needed')) {
+          console.log('bootstrap-admin: already done'); process.exit(0); }
+
+          console.error(`bootstrap-admin: unexpected HTTP ${res.status}`); //
+          never print the body: it may echo input
+
+          process.exit(1);
+    - name: close-signup
+      when: first-deploy
+      component: web
+      timeoutSeconds: 300
+      command:
+        - sh
+        - -c
+        - >
+          npx prisma db execute --schema /calcom/packages/prisma/schema.prisma
+          --stdin <<'SQL'
+
+          UPDATE "Feature" SET enabled = true WHERE slug = 'disable-signup';
+
+          SQL
+  cron:
+    - name: tasker
+      schedule: "* * * * *"
+      http:
+        method: GET
+        path: /api/tasks/cron
+        authEnv: CRON_SECRET
+        authScheme: bearer
+    - name: tasker-cleanup
+      schedule: 0 0 * * *
+      http:
+        method: GET
+        path: /api/tasks/cleanup
+        authEnv: CRON_SECRET
+        authScheme: bearer
+    - name: calendar-subscriptions
+      schedule: "*/5 * * * *"
+      http:
+        method: GET
+        path: /api/cron/calendar-subscriptions
+        authEnv: CRON_SECRET
+        authScheme: bearer
+    - name: calendar-subscriptions-cleanup
+      schedule: 0 3 * * *
+      http:
+        method: GET
+        path: /api/cron/calendar-subscriptions-cleanup
+        authEnv: CRON_SECRET
+        authScheme: bearer
+    - name: booking-reminder
+      schedule: "*/15 * * * *"
+      http:
+        method: POST
+        path: /api/cron/bookingReminder
+        authEnv: CRON_API_KEY
+        authScheme: raw
+    - name: change-time-zone
+      schedule: 0 * * * *
+      http:
+        method: POST
+        path: /api/cron/changeTimeZone
+        authEnv: CRON_API_KEY
+        authScheme: raw
+    - name: webhook-triggers
+      schedule: "* * * * *"
+      http:
+        method: POST
+        path: /api/cron/webhookTriggers
+        authEnv: CRON_API_KEY
+        authScheme: raw
+  domains:
+    primaryComponent: web
+    publicUrlEnv:
+      - NEXT_PUBLIC_WEBAPP_URL
+      - NEXTAUTH_URL
+    onChange: restart
+    needsHairpin: true
+  smoke:
+    - name: version
+      http:
+        method: GET
+        path: /api/version
+      expect:
+        status:
+          - 200
+    - name: login
+      http:
+        method: GET
+        path: /auth/login
+      expect:
+        status:
+          - 200
+        bodyNotContains:
+          - localhost:3000
+          - NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER
+    - name: setup-closed
+      http:
+        method: POST
+        path: /api/auth/setup
+      expect:
+        status:
+          - 400
+    - name: cron-refuses-anonymous
+      http:
+        method: GET
+        path: /api/tasks/cron
+      expect:
+        status:
+          - 401
+  checks:
+    - name: type-check
+      command: yarn install --immutable && yarn type-check:ci --force
+      required: true
+      timeoutSeconds: 3600
+    - name: biome
+      command: yarn install --immutable && yarn biome check .
+      required: false
+      timeoutSeconds: 1800
+    - name: unit-tests
+      command: yarn install --immutable && TZ=UTC yarn test
+      required: false
+      timeoutSeconds: 3600
+  agents:
+    instructionFiles:
+      - AGENTS.md
+    maxPullRequestChangedLines: 500
+  upstreamSync:
+    schedule: 0 6 * * 1
+    mode: merge
+  upstreamPullRequests:
+    enabled: false
+    requireApproval: true
+  source:
+    relation: fork
+    upstream:
+      repo: calcom/cal.diy
+      defaultBranch: main
+    branch: main
