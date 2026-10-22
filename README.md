@@ -4,6 +4,10 @@
 > [!TIP]
 > For any commercial and enterprise-ready scheduling infrastructure, use Cal.com, not Cal.diy; hosted by us or get invited to on-prem enterprise access here: <a href="https://cal.com/sales">https://cal.com/sales</a>
 
+> [!NOTE]
+> **Hosted on Ever Works.** This fork runs on the Ever Works managed Apps target at <a href="https://cal-e2e.ever.app">https://cal-e2e.ever.app</a>.
+> The Dockerfile `runner` stage runs as the unprivileged uid 1000 (`USER 1000:1000`) because the managed target enforces Pod Security `restricted`.
+
 <!-- PROJECT LOGO -->
 <p align="center">
   <a href="https://github.com/calcom/cal.diy">
